@@ -405,3 +405,105 @@ test('#117 several scrubbing centers: nearest first, spill to the next, and far 
   assert.equal(ev("S.scrubs.some(x=>x.city==='lon')"), false);
   assert.deepEqual(errors, []);
 });
+
+// Custom routing metrics: a fra–ams–par triangle where the direct fra–par link is normally shortest.
+const triangle = (ev) => {
+  ev("ACT.start({});S.cash=1e9;S.lvl=4;for(const g of GOALS)S.done[g.id]=0;ACT.launchBB({city:'fra'})");
+  ev("for(const c of ['ams','par'])ACT.buildPop({city:c});const L=(a,b)=>{UI.via=null;openLinkModal(a,b);ACT.buildLink({tier:1});closeModal();};L('fra','ams');L('ams','par');L('fra','par');compute()");
+  ev("window.FP=S.links.find(l=>(l.a==='fra'&&l.b==='par')||(l.a==='par'&&l.b==='fra')).id;window.hops=()=>JSON.stringify(trPaths('fra').path('par').map(h=>h.l.id))");
+};
+
+test('a custom multiplier routes exactly like the matching preset', () => {
+  const { ev, errors } = load();
+  triangle(ev);
+  assert.equal(ev("hops()"), JSON.stringify([ev("FP")]), 'direct link wins by default');
+  ev("ACT.setMetric({id:FP,v:'avoid'})");
+  const avoid = ev("JSON.stringify({h:hops(),load:R.load,served:R.served})");
+  ev("ACT.setMetric({id:FP,v:'custom'})");
+  const l = ev("S.links.find(l=>l.id===FP)");
+  assert.equal(l.metric, 'custom');
+  assert.equal(l.mk, 'f');
+  assert.equal(l.mv, 4, 'custom starts from the preset it replaces');
+  assert.equal(ev("JSON.stringify({h:hops(),load:R.load,served:R.served})"), avoid);
+  ev("ACT.setMetric({id:FP,v:'normal'})");
+  assert.equal(ev("'mk' in S.links.find(l=>l.id===FP)||'mv' in S.links.find(l=>l.id===FP)"), false, 'presets drop the custom fields');
+  assert.deepEqual(errors, []);
+});
+
+test('an absolute custom cost steers the path, and switching modes keeps the cost', () => {
+  const { ev, errors } = load();
+  triangle(ev);
+  ev("ACT.setMetric({id:FP,v:'custom'});ACT.metricMode({id:FP,k:'w'})");
+  const l = ev("S.links.find(l=>l.id===FP)");
+  assert.equal(l.mk, 'w');
+  assert.equal(l.mv, Math.round(l.km + 60), 'switching to cost keeps the effective metric');
+  ev("ACT.selLink({id:FP});renderAll();$('metIn').value='65535';ACT.metricSet({id:FP})");
+  assert.equal(ev("S.links.find(l=>l.id===FP).mv"), 65535);
+  assert.ok(!JSON.parse(ev("hops()")).includes(ev("FP")), 'a huge cost sends traffic round via Amsterdam');
+  ev("renderAll();$('metIn').value='1';ACT.metricSet({id:FP})");
+  assert.equal(ev("hops()"), JSON.stringify([ev("FP")]));
+  ev("ACT.metricMode({id:FP,k:'f'})");
+  assert.equal(ev("S.links.find(l=>l.id===FP).mv"), 0.1, 'converted back to a multiplier, clamped to the minimum');
+  assert.deepEqual(errors, []);
+});
+
+test('custom metric input is validated and clamped', () => {
+  const { ev, errors } = load();
+  triangle(ev);
+  ev("ACT.setMetric({id:FP,v:'custom'});ACT.selLink({id:FP});renderAll()");
+  ev("$('metIn').value='';ACT.metricSet({id:FP})");
+  assert.equal(ev("S.links.find(l=>l.id===FP).mv"), 1, 'empty input changes nothing');
+  ev("renderAll();$('metIn').value='9999';ACT.metricSet({id:FP})");
+  assert.equal(ev("S.links.find(l=>l.id===FP).mv"), 100);
+  ev("renderAll();$('metIn').value='0';ACT.metricSet({id:FP})");
+  assert.equal(ev("S.links.find(l=>l.id===FP).mv"), 0.1);
+  ev("ACT.metricMode({id:FP,k:'x'});ACT.setMetric({id:FP,v:'bogus'})");
+  assert.equal(ev("S.links.find(l=>l.id===FP).metric"), 'custom');
+  assert.deepEqual(errors, []);
+});
+
+test('custom metrics survive a save, and broken ones are repaired', () => {
+  const { ev, errors } = load();
+  triangle(ev);
+  ev("ACT.setMetric({id:FP,v:'custom'});ACT.metricMode({id:FP,k:'w'});S.links.find(l=>l.id===FP).mv=777;S=migrate(JSON.parse(JSON.stringify(S)));compute()");
+  let l = ev("S.links.find(l=>l.id===FP)");
+  assert.deepEqual([l.metric, l.mk, l.mv], ['custom', 'w', 777]);
+  ev("Object.assign(S.links.find(l=>l.id===FP),{mk:'zz',mv:'lots'});S=migrate(JSON.parse(JSON.stringify(S)));compute()");
+  l = ev("S.links.find(l=>l.id===FP)");
+  assert.deepEqual([l.metric, l.mk, l.mv], ['custom', 'f', 1]);
+  ev("Object.assign(S.links.find(l=>l.id===FP),{metric:'custom',mk:'w',mv:1e9});S=migrate(JSON.parse(JSON.stringify(S)))");
+  assert.equal(ev("S.links.find(l=>l.id===FP).mv"), 65535);
+  // An old save: preset metric, no custom fields at all.
+  ev("const x=S.links.find(l=>l.id===FP);x.metric='avoid';delete x.mk;delete x.mv;S=migrate(JSON.parse(JSON.stringify(S)));compute()");
+  l = ev("S.links.find(l=>l.id===FP)");
+  assert.equal(l.metric, 'avoid');
+  assert.ok(!('mk' in l) && !('mv' in l));
+  assert.equal(JSON.parse(ev("hops()")).length, 2, 'the old save still routes, avoiding the direct link');
+  assert.deepEqual(errors, []);
+});
+
+test('preset buttons stay plain, and Custom explains the numbers, also on phones', () => {
+  const { ev, dom, errors } = load();
+  triangle(ev);
+  for (const w of [1280, 390]) {
+    ev(`window.innerWidth=${w};ACT.setMetric({id:FP,v:'normal'});ACT.selLink({id:FP});renderAll()`);
+    const doc = dom.window.document;
+    const btns = [...doc.querySelectorAll('#panel [data-act="setMetric"]')];
+    assert.equal(btns.length, 5);
+    const km = ev("S.links.find(l=>l.id===FP).km");
+    assert.deepEqual(btns.map(b => b.textContent), ['Prefer', 'Normal', 'Avoid', 'Backup only', 'Custom']);
+    assert.equal(doc.getElementById('metIn'), null);
+    assert.doesNotMatch(doc.getElementById('panel').textContent, /times a multiplier/);
+    ev("ACT.setMetric({id:FP,v:'custom'})");
+    assert.ok(doc.getElementById('metIn'), `custom editor at ${w}px`);
+    assert.ok(doc.querySelector('#panel [data-act="metricMode"]'));
+    const txt = doc.getElementById('panel').textContent;
+    assert.match(txt, /times a multiplier/);
+    assert.match(txt, new RegExp(`Normal ×1 = ${Math.round(km + 60)}, Avoid ×4 = ${Math.round((km + 60) * 4)}`));
+    assert.match(txt, /Multiplier: scales the distance cost/);
+    assert.match(txt, /Cost on this link/);
+    ev("ACT.metricMode({id:FP,k:'w'})");
+    assert.match(doc.getElementById('panel').textContent, /Cost: the exact number/);
+  }
+  assert.deepEqual(errors, []);
+});

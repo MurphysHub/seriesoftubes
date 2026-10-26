@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The project follows
 
 ## [Unreleased]
 
+- Links can now use a custom routing metric, set either as a multiplier or as an exact cost. Pick Custom under Routing metric to fine-tune where your traffic goes; it explains how a link's cost is worked out and what each preset comes to on that link.
+
 ## [1.31.0] — 2026-10-26
 
 - Series of Tubes now speaks French. The game follows your browser's language the first time, and you can switch to Français under Settings or on the title screen.
